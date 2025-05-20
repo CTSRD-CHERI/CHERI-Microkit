@@ -416,6 +416,7 @@ pub fn pd_write_symbols(
 
         for (setvar_idx, setvar) in pd.setvars.iter().enumerate() {
             let value = pd_setvar_values[i][setvar_idx];
+            println!("Writing symbol {} with value {:x}", setvar.symbol, value);
             let result = elf.write_symbol(&setvar.symbol, &value.to_le_bytes());
             if result.is_err() {
                 return Err(format!(
@@ -527,6 +528,7 @@ fn kernel_boot_mem(kernel_elf: &ElfFile) -> MemoryRegion {
         .expect("Could not find 'ki_boot_end' symbol");
     let ki_boot_end_p = ki_boot_end_v - segments[0].virt_addr + base;
 
+    println!("ki_boot_end_p = {}", ki_boot_end_p);
     MemoryRegion::new(base, ki_boot_end_p)
 }
 
@@ -707,6 +709,7 @@ fn emulate_kernel_boot(
         normal_memory.aligned_power_of_two_regions(config, max_bits),
     ]
     .concat();
+
     let mut untyped_objects = Vec::new();
     for (i, r) in device_regions.iter().enumerate() {
         let cap = i as u64 + first_untyped_cap;
@@ -1828,6 +1831,13 @@ fn build_system(
                     }
                 }
 
+                if config.cheri {
+										match config.arch {
+												Arch::Aarch64 => attrs |= ArmVmAttributes::CheriEnableAll as u64,
+												Arch::Riscv64 => attrs |= RiscvVmAttributes::CheriEnableAll as u64,
+										}
+                }
+
                 assert!(!mr_pages[mr].is_empty());
                 assert!(util::objects_adjacent(&mr_pages[mr]));
 
@@ -1913,6 +1923,13 @@ fn build_system(
                     Arch::Riscv64 => {}
                 }
             }
+
+						if config.cheri {
+								match config.arch {
+										Arch::Aarch64 => attrs |= ArmVmAttributes::CheriEnableAll as u64,
+										Arch::Riscv64 => attrs |= RiscvVmAttributes::CheriEnableAll as u64,
+								}
+						}
 
             assert!(!mr_pages[mr].is_empty());
             assert!(util::objects_adjacent(&mr_pages[mr]));
@@ -2423,46 +2440,46 @@ fn build_system(
     }
 
     // Now map all the pages
-    for (page_cap_address, pd_idx, vaddr, rights, attr, count, vaddr_incr) in pd_page_descriptors {
+    for (page_cap_address, pd_idx, vaddr, rights, attr, count, vaddr_incr) in &pd_page_descriptors {
         let mut invocation = Invocation::new(
             config,
             InvocationArgs::PageMap {
-                page: page_cap_address,
-                vspace: pd_vspace_objs[pd_idx].cap_addr,
-                vaddr,
-                rights,
-                attr,
+                page: *page_cap_address,
+                vspace: pd_vspace_objs[*pd_idx].cap_addr,
+                vaddr: *vaddr,
+                rights: *rights,
+                attr: *attr,
             },
         );
         invocation.repeat(
-            count as u32,
+            *count as u32,
             InvocationArgs::PageMap {
                 page: 1,
                 vspace: 0,
-                vaddr: vaddr_incr,
+                vaddr: *vaddr_incr,
                 rights: 0,
                 attr: 0,
             },
         );
         system_invocations.push(invocation);
     }
-    for (page_cap_address, vm_idx, vaddr, rights, attr, count, vaddr_incr) in vm_page_descriptors {
+    for (page_cap_address, vm_idx, vaddr, rights, attr, count, vaddr_incr) in &vm_page_descriptors {
         let mut invocation = Invocation::new(
             config,
             InvocationArgs::PageMap {
-                page: page_cap_address,
-                vspace: vm_vspace_objs[vm_idx].cap_addr,
-                vaddr,
-                rights,
-                attr,
+                page: *page_cap_address,
+                vspace: vm_vspace_objs[*vm_idx].cap_addr,
+                vaddr: *vaddr,
+                rights: *rights,
+                attr: *attr,
             },
         );
         invocation.repeat(
-            count as u32,
+            *count as u32,
             InvocationArgs::PageMap {
                 page: 1,
                 vspace: 0,
-                vaddr: vaddr_incr,
+                vaddr: *vaddr_incr,
                 rights: 0,
                 attr: 0,
             },
@@ -2479,6 +2496,7 @@ fn build_system(
         let (vaddr, _) = pd_elf_files[pd_idx]
             .find_symbol(SYMBOL_IPC_BUFFER)
             .unwrap_or_else(|_| panic!("Could not find {}", SYMBOL_IPC_BUFFER));
+        println!("Mapping an IPC buffer @ {vaddr:x}");
         system_invocations.push(Invocation::new(
             config,
             InvocationArgs::PageMap {
@@ -2489,6 +2507,47 @@ fn build_system(
                 attr: ipc_buffer_attr,
             },
         ));
+
+        let elf_flags = pd_elf_files[pd_idx].flags;
+        let purecap = match config.arch {
+            Arch::Aarch64 => if((elf_flags & 0x00010000) >> 16) == 1 {true} else {false},
+            Arch::Riscv64 => if((elf_flags & 0x00020000) >> 17) == 1 {true} else {false},
+        };
+
+        if purecap && config.cheri {
+						let (ipc_vaddr, _) = pd_elf_files[pd_idx]
+								.find_symbol("__sel4_ipc_buffer_cap")
+								.unwrap_or_else(|_| panic!("Could not find {}", "__sel4_ipc_buffer_cap"));
+						println!("Mapping an IPC buffer @ {ipc_vaddr:x}");
+
+            let ipc_symbol_page = ((ipc_vaddr) >> 12) << 12;
+						println!("IPC buffer page @ {ipc_symbol_page:x}");
+
+            let page_cap = pd_page_descriptors
+                .iter()
+                .find(|(_, pdidx, vaddr, _, _, _, _)| (*vaddr == ipc_symbol_page) && (*pdidx == pd_idx))
+                .map(|(cap_cptr, _, _, _, _, _, _)| *cap_cptr)
+                .unwrap_or(0);
+
+            println!("Page cptr for IPC buffer is {}", page_cap);
+
+						let mut cheri_meta = 1; // tag
+						cheri_meta |= ((0x1) << 18) << 32; // R perms
+						cheri_meta |= (0x1) << 32; // W perms
+						system_invocations.push(Invocation::new(
+								config,
+								InvocationArgs::CheriWriteMemoryCap{
+										tcb: tcb_objs[pd_idx].cap_addr,
+										vspace_root: vspace_objs[pd_idx].cap_addr,
+                    page: page_cap,
+										vaddr: ipc_vaddr,
+										cheri_base: vaddr,
+										cheri_addr: vaddr,
+										cheri_size: 4096,
+										cheri_meta: cheri_meta
+								},
+						));
+        }
     }
 
     // Initialise the TCBs
@@ -2654,8 +2713,39 @@ fn build_system(
         ));
     }
 
+    let pd_setvar_values: Vec<Vec<u64>> = system
+        .protection_domains
+        .iter()
+        .map(|pd| {
+            pd.setvars
+                .iter()
+                .map(|setvar| match &setvar.kind {
+                    sdf::SysSetVarKind::Size { mr } => {
+                        system
+                            .memory_regions
+                            .iter()
+                            .find(|m| m.name == *mr)
+                            .unwrap()
+                            .size
+                    }
+                    sdf::SysSetVarKind::Vaddr { address, mr } => *address,
+                    sdf::SysSetVarKind::Paddr { region } => {
+                        let mr = system
+                            .memory_regions
+                            .iter()
+                            .find(|mr| mr.name == *region)
+                            .unwrap_or_else(|| panic!("Cannot find region: {}", region));
+
+                        mr_pages[mr][0].phys_addr
+                    }
+                })
+                .collect()
+        })
+        .collect();
+
     // Set TCB registers (we only set the entry point)
-    for pd_idx in 0..system.protection_domains.len() {
+    //for pd_idx in 0..system.protection_domains.len() {
+    for (pd_idx, pd) in system.protection_domains.iter().enumerate() {
         let regs = match config.arch {
             Arch::Aarch64 => Aarch64Regs {
                 pc: pd_elf_files[pd_idx].entry,
@@ -2671,6 +2761,8 @@ fn build_system(
             .field_names(),
         };
 
+        println!("Stack top is {:#x}", config.pd_stack_top());
+
         system_invocations.push(Invocation::new(
             config,
             InvocationArgs::TcbWriteRegisters {
@@ -2683,6 +2775,214 @@ fn build_system(
                 regs,
             },
         ));
+
+        let elf_flags = pd_elf_files[pd_idx].flags;
+
+        let purecap = match config.arch {
+            Arch::Aarch64 => if((elf_flags & 0x00010000) >> 16) == 1 {true} else {false},
+            Arch::Riscv64 => if((elf_flags & 0x00020000) >> 17) == 1 {true} else {false},
+        };
+
+        if purecap && config.cheri {
+            println!("pd {}: is purecap", pd.name);
+            println!("Writing PC with addr {:x} and size {:x}", pd_elf_files[pd_idx].entry, pd_elf_files[pd_idx].get_code_segement_size());
+
+            let segments = pd_elf_files[pd_idx].loadable_segments();
+            let code_segments = pd_elf_files[pd_idx].code_segments();
+            let data_segments = pd_elf_files[pd_idx].data_segments();
+
+            if code_segments.len() != 1 || data_segments.len() != 1 {
+								eprintln!(
+										"CHERI Protection domains can only have one code segment and one data segment"
+								);
+								std::process::exit(1);
+            }
+
+            /* Code PC */
+						let mut cheri_meta = 1; // tag
+						cheri_meta |= 0; // cap mode
+						cheri_meta |= 1 << 2; // sentry
+						cheri_meta |= 0xffffffff << 32; // perms
+
+						system_invocations.push(Invocation::new(
+								config,
+								InvocationArgs::CheriWriteRegister {
+										tcb: tcb_objs[pd_idx].cap_addr,
+										vspace_root: vspace_objs[pd_idx].cap_addr,
+										reg_idx: 0,
+										cheri_base: code_segments[0].virt_addr,
+										cheri_addr: pd_elf_files[pd_idx].entry,
+										cheri_size: code_segments[0].data.len() as u64 + data_segments[0].data.len() as u64,
+										cheri_meta: cheri_meta
+								},
+						));
+
+            /* SP */
+						cheri_meta = 1; // tag
+						cheri_meta |= 0xfffcffff << 32; // perms - X - ASR
+						system_invocations.push(Invocation::new(
+								config,
+								InvocationArgs::CheriWriteRegister {
+										tcb: tcb_objs[pd_idx].cap_addr,
+										vspace_root: vspace_objs[pd_idx].cap_addr,
+										reg_idx: 2,
+										cheri_base: config.pd_stack_top() - pd.stack_size,
+										cheri_addr: config.pd_stack_top(),
+										cheri_size: pd.stack_size,
+										cheri_meta: cheri_meta
+								},
+						));
+
+            /* Null DDC */
+						system_invocations.push(Invocation::new(
+								config,
+								InvocationArgs::CheriWriteRegister {
+										tcb: tcb_objs[pd_idx].cap_addr,
+										vspace_root: 0,
+										reg_idx: 35,
+										cheri_base: 0,
+										cheri_addr: 0,
+										cheri_size: 0,
+										cheri_meta: 0
+								},
+						));
+
+            /* Code cap in ca0 */
+						let mut cheri_meta = 1; // tag
+						cheri_meta |= 0 ; // cap mode
+						cheri_meta |= 0xfffefffe << 32; // perms - W perms - ASR
+						let cheri_size = code_segments[0].data.len() as u64;
+						system_invocations.push(Invocation::new(
+								config,
+								InvocationArgs::CheriWriteRegister {
+										tcb: tcb_objs[pd_idx].cap_addr,
+										vspace_root: vspace_objs[pd_idx].cap_addr,
+										reg_idx: 16,
+										cheri_base: code_segments[0].virt_addr,
+										cheri_addr: code_segments[0].virt_addr,
+										cheri_size: code_segments[0].data.len() as u64 + data_segments[0].data.len() as u64,
+										cheri_meta: cheri_meta
+								},
+						));
+
+            /* Data cap in ca1 */
+						cheri_meta = 1; // tag
+						cheri_meta |= 0xfffcffff << 32; // perms - X perms
+						system_invocations.push(Invocation::new(
+								config,
+								InvocationArgs::CheriWriteRegister{
+										tcb: tcb_objs[pd_idx].cap_addr,
+										vspace_root: vspace_objs[pd_idx].cap_addr,
+										reg_idx: 17,
+										cheri_base: data_segments[0].virt_addr,
+										cheri_addr: data_segments[0].virt_addr,
+										cheri_size: data_segments[0].data.len() as u64,
+										cheri_meta: cheri_meta
+								},
+						));
+
+            for setvar in &pd.setvars {
+                println!("{setvar:?}")
+            }
+
+            /* Patch all set_var_mrs */
+            for (setvar_idx, setvar) in pd.setvars.iter().enumerate() {
+                let value = pd_setvar_values[pd_idx][setvar_idx];
+                let (vaddr, size) = pd_elf_files[pd_idx].find_symbol(setvar.symbol.as_str())?;
+
+                let mrr = match &setvar.kind {
+                    sdf::SysSetVarKind::Vaddr { address, mr } => mr.clone(),
+                    _ => "".to_string()
+                };
+
+                println!("{mrr:?}");
+
+								let mr = system
+										.memory_regions
+										.iter()
+										.find(|m| m.name == mrr);
+                println!("{mr:?}");
+                let size = mr.map(|region| region.size).unwrap_or(0);
+
+								let mp = &pd.maps
+										.iter()
+										.find(|m| m.mr == mrr);
+                println!("{mp:?}");
+                let perms = mp.map(|region| region.perms).unwrap_or(0);
+                println!("permissions are {perms:?}");
+
+                for map in &pd.maps {
+                    println!("{map:?}");
+                }
+
+                let page_aligned = (vaddr) & !((1 << 12) - 1);
+
+                let page_cap = pd_page_descriptors
+                    .iter()
+                    .find(|(_, pdidx, vaddrr, _, _, _, _)| (*vaddrr == page_aligned) && (*pdidx == pd_idx))
+                    .map(|(cap_cptr, _, _, _, _, _, _)| *cap_cptr)
+                    .unwrap_or(0);
+
+                println!("Page cptr for ELF setvar is {:x}", page_cap);
+
+                println!("Writing memcap symbol @ [{:x}] -- {} with value {:x}, size {:x}", vaddr, setvar.symbol, value, size);
+								let mut cheri_meta = 1; // tag
+
+                let convert_perms = perms as u64;
+								cheri_meta |= ((convert_perms & 0x1) << 18) << 32; // R perms
+								cheri_meta |= ((convert_perms & 0x2) >> 1) << 32; // W perms
+								cheri_meta |= ((convert_perms & 0x4) << 15) << 32; // X perms
+								cheri_meta |= ((convert_perms & 0x8) << 2) << 32; // X perms
+                system_invocations.push(Invocation::new(
+                    config,
+                    InvocationArgs::CheriWriteMemoryCap{
+                        tcb: tcb_objs[pd_idx].cap_addr,
+                        vspace_root: vspace_objs[pd_idx].cap_addr,
+                        page: page_cap,
+                        vaddr: vaddr,
+                        cheri_base: value,
+                        cheri_addr: value,
+                        cheri_size: size,
+                        cheri_meta: cheri_meta
+                    },
+                ));
+            }
+        } else if config.cheri {
+						let mut cheri_meta = 1; // tag
+						cheri_meta |= 1 << 1; // Integer Pointer Mode
+						cheri_meta |= 1 << 2; // sentry
+						cheri_meta |= 0xffffffff << 32; // perms
+						let cheri_size = u64::MAX;
+
+						system_invocations.push(Invocation::new(
+								config,
+								InvocationArgs::CheriWriteRegister {
+										tcb: tcb_objs[pd_idx].cap_addr,
+										vspace_root: vspace_objs[pd_idx].cap_addr,
+										reg_idx: 0,
+										cheri_base: 0,
+										cheri_addr: pd_elf_files[pd_idx].entry,
+										cheri_size: cheri_size,
+										cheri_meta: cheri_meta
+								},
+						));
+
+						let mut cheri_meta = 1; // tag
+						cheri_meta |= 0xffffffff << 32; // perms
+						system_invocations.push(Invocation::new(
+								config,
+								InvocationArgs::CheriWriteRegister {
+										tcb: tcb_objs[pd_idx].cap_addr,
+										vspace_root: vspace_objs[pd_idx].cap_addr,
+										reg_idx: 35,
+										cheri_base: 0,
+										cheri_addr: 0,
+										cheri_size: cheri_size,
+										cheri_meta: cheri_meta
+								},
+						));
+
+        }
     }
     // AArch64 and RISC-V expect the stack pointer to be 16-byte aligned
     assert!(config.pd_stack_top() % 16 == 0);
@@ -2765,7 +3065,7 @@ fn build_system(
                             .unwrap()
                             .size
                     }
-                    sdf::SysSetVarKind::Vaddr { address } => *address,
+                    sdf::SysSetVarKind::Vaddr { address, mr } => *address,
                     sdf::SysSetVarKind::Paddr { region } => {
                         let mr = system
                             .memory_regions
@@ -3247,6 +3547,8 @@ fn main() -> Result<(), String> {
                 Some(40)
             } else if json_str_as_bool(&kernel_config_json, "ARM_PA_SIZE_BITS_44")? {
                 Some(44)
+            } else if json_str_as_bool(&kernel_config_json, "ARM_PA_SIZE_BITS_48")? {
+                Some(47)
             } else {
                 panic!("Expected ARM platform to have 40 or 44 physical address bits")
             }
@@ -3273,6 +3575,7 @@ fn main() -> Result<(), String> {
         init_cnode_bits: json_str_as_u64(&kernel_config_json, "ROOT_CNODE_SIZE_BITS")?,
         cap_address_bits: 64,
         fan_out_limit: json_str_as_u64(&kernel_config_json, "RETYPE_FAN_OUT_LIMIT")?,
+        cheri: json_str_as_bool(&kernel_config_json, "HAVE_CHERI")?,
         hypervisor,
         benchmark: args.config == "benchmark",
         fpu: json_str_as_bool(&kernel_config_json, "HAVE_FPU")?,
@@ -3412,6 +3715,10 @@ fn main() -> Result<(), String> {
         std::process::exit(1);
     }
 
+    //for el in &built_system.kernel_boot_info.untyped_objects{
+    //       println!("{} ", el.base);
+    //}
+
     let untyped_info_header = MonitorUntypedInfoHeader64 {
         cap_start: built_system.kernel_boot_info.untyped_objects[0].cap,
         cap_end: built_system
@@ -3432,6 +3739,7 @@ fn main() -> Result<(), String> {
             is_device: ut.is_device as u64,
         })
         .collect();
+
     let mut untyped_info_data: Vec<u8> =
         Vec::from(unsafe { struct_to_bytes(&untyped_info_header) });
     for o in &untyped_info_object_data {

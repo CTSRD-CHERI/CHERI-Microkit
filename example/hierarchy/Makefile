@@ -19,18 +19,36 @@ ifeq ($(strip $(MICROKIT_CONFIG)),)
 $(error MICROKIT_CONFIG must be specified)
 endif
 
+ifndef CHERI
+CHERI = 0
+endif
+
 BOARD_DIR := $(MICROKIT_SDK)/board/$(MICROKIT_BOARD)/$(MICROKIT_CONFIG)
 
 ARCH := ${shell grep 'CONFIG_SEL4_ARCH  ' $(BOARD_DIR)/include/kernel/gen_config.h | cut -d' ' -f4}
 
 ifeq ($(ARCH),aarch64)
   TARGET_TRIPLE := aarch64-none-elf
-  CFLAGS_ARCH := -mstrict-align
 else ifeq ($(ARCH),riscv64)
   TARGET_TRIPLE := riscv64-unknown-elf
+endif
+
+ifeq ($(CHERI),1)
+ifeq ($(ARCH),riscv64)
+  CFLAGS_ARCH := -march=rv64imafdc_zicsr_zifencei_zcherihybrid -mabi=l64pc128d
+else
+$(error Unsupported CHERI ARCH)
+endif
+  LIBS := -lmicrokit_purecap -Tmicrokit.ld
+else
+ifeq ($(ARCH),aarch64)
+  CFLAGS_ARCH := -mstrict-align
+else ifeq ($(ARCH),riscv64)
   CFLAGS_ARCH := -march=rv64imafdc_zicsr_zifencei -mabi=lp64d
 else
 $(error Unsupported ARCH)
+endif
+  LIBS := -lmicrokit -Tmicrokit.ld
 endif
 
 ifeq ($(strip $(LLVM)),True)
@@ -52,7 +70,6 @@ HELLO_OBJS := hello.o
 IMAGES := restarter.elf crasher.elf hello.elf
 CFLAGS := -nostdlib -ffreestanding -g -O3 -Wall  -Wno-unused-function -Werror -I$(BOARD_DIR)/include $(CFLAGS_ARCH)
 LDFLAGS := -L$(BOARD_DIR)/lib
-LIBS := -lmicrokit -Tmicrokit.ld
 
 IMAGE_FILE = $(BUILD_DIR)/loader.img
 REPORT_FILE = $(BUILD_DIR)/report.txt
@@ -63,7 +80,7 @@ $(BUILD_DIR)/%.o: %.c Makefile
 	$(CC) -c $(CFLAGS) $< -o $@
 
 $(BUILD_DIR)/%.o: %.s Makefile
-	$(AS) -g -mcpu=$(CPU) $< -o $@
+	$(AS) -c -g -mcpu=$(CPU) $< -o $@
 
 $(BUILD_DIR)/restarter.elf: $(addprefix $(BUILD_DIR)/, $(RESTARTER_OBJS))
 	$(LD) $(LDFLAGS) $^ $(LIBS) -o $@

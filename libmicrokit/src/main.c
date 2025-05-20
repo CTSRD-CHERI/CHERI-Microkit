@@ -34,7 +34,13 @@ seL4_Word microkit_pps;
 
 extern seL4_IPCBuffer __sel4_ipc_buffer_obj;
 
+#if !defined(__CHERI_PURE_CAPABILITY__)
 seL4_IPCBuffer *__sel4_ipc_buffer = &__sel4_ipc_buffer_obj;
+//seL4_IPCBuffer *__sel4_ipc_buffer;
+#else
+seL4_IPCBuffer *__sel4_ipc_buffer_cap;
+seL4_IPCBuffer *__sel4_ipc_buffer = &__sel4_ipc_buffer_obj;
+#endif
 
 extern const void (*const __init_array_start [])(void);
 extern const void (*const __init_array_end [])(void);
@@ -110,6 +116,9 @@ static void handler_loop(void)
 void main(void)
 {
     run_init_funcs();
+#if defined(__CHERI_PURE_CAPABILITY__)
+    __sel4_ipc_buffer = __sel4_ipc_buffer_cap;
+#endif
     init();
 
     /*

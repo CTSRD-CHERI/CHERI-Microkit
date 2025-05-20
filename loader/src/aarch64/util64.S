@@ -68,6 +68,8 @@
 #define TCR_PS TCR_PS_1T
 #elif PHYSICAL_ADDRESS_BITS == 44
 #define TCR_PS TCR_PS_16T
+#elif PHYSICAL_ADDRESS_BITS == 47
+#define TCR_PS TCR_PS_16T
 #else
 #error "Unsupported PHYSICAL_ADDRESS_BITS value"
 #endif

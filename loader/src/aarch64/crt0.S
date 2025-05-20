@@ -5,6 +5,35 @@
  */
 .extern main
 
+/*
+ * Initialize morello on a cpu
+ */
+#ifdef  __CHERI__
+.macro morello_cpu_init
+#ifdef __CHERI_PURE_CAPABILITY__
+  .arch_extension a64c
+#endif
+  /* Enable Morello instructions at EL0 and EL1 */
+  mrs x5, cpacr_el1
+  bic x5, x5, CPACR_CEN_MASK
+  orr x5, x5, CPACR_CEN_TRAP_NONE
+  msr cpacr_el1, x5
+  isb
+
+  /*
+   * Allow access to CNTVCT_EL0 without PCC System permission and enable
+   * capability sealing for branch and link at EL0.
+   *
+   * XXXBFG should this be done somewhere else? Maybe eventually per-process or
+   * compartment?
+   */
+  mrs x5, cctlr_el0
+  #orr x5, x5, #(CCTLR_PERMVCT_MASK | CCTLR_SBL_MASK)
+  orr x5, x5, #(CCTLR_PERMVCT_MASK)
+  msr cctlr_el0, x2
+.endmacro
+#endif
+
 .section ".text.start"
 
 .global _start;

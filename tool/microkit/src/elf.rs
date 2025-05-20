@@ -133,6 +133,7 @@ enum ElfSegmentAttributes {
 
 pub struct ElfFile {
     pub word_size: usize,
+    pub flags: u64,
     pub entry: u64,
     pub segments: Vec<ElfSegment>,
     symbols: HashMap<String, (ElfSymbol64, bool)>,
@@ -188,6 +189,7 @@ impl ElfFile {
             ));
         }
 
+        let flags = hdr.flags.into();
         let entry = hdr.entry;
 
         // Read all the segments
@@ -296,10 +298,16 @@ impl ElfFile {
 
         Ok(ElfFile {
             word_size,
+            flags,
             entry,
             segments,
             symbols,
         })
+    }
+
+    fn find_key_for_value<'a>(map: &'a HashMap<String, (ElfSymbol64, bool)>, value: u64) -> Option<&ElfSymbol64> {
+          map.iter()
+                  .find_map(|(key, val)| if val.0.value == value { Some(&val.0) } else { None })
     }
 
     pub fn find_symbol(&self, variable_name: &str) -> Result<(u64, u64), String> {
@@ -315,6 +323,21 @@ impl ElfFile {
             Err(format!("No symbol named '{variable_name}' not found"))
         }
     }
+
+		pub fn v_entry_size(&self) -> u64 {
+				let symbol = Self::find_key_for_value(&self.symbols, self.entry);
+				match symbol {
+						Some(sym) => {
+								// Copy fields out to aligned locals
+								let name = sym.name;
+								let size = sym.size;
+								println!("Found it, with name {}, and size {}", name, size);
+						},
+						None => println!("Cannot divide by 0"),
+				}
+
+				0
+		}
 
     pub fn write_symbol(&mut self, variable_name: &str, data: &[u8]) -> Result<(), String> {
         let (vaddr, size) = self.find_symbol(variable_name)?;
@@ -341,6 +364,15 @@ impl ElfFile {
         None
     }
 
+    pub fn get_code_segement_size(&self) -> u64 {
+        for seg in &self.segments {
+            if self.entry >= seg.virt_addr && self.entry < seg.virt_addr + seg.data.len() as u64 {
+                return seg.data.len() as u64;
+            }
+        }
+        0
+    }
+
     fn get_string(strtab: &[u8], idx: usize) -> Result<&str, String> {
         match strtab[idx..].iter().position(|&b| b == 0) {
             Some(null_byte_pos) => {
@@ -358,6 +390,14 @@ impl ElfFile {
                 idx
             )),
         }
+    }
+
+    pub fn code_segments(&self) -> Vec<&ElfSegment> {
+        self.segments.iter().filter(|s| s.loadable && !s.is_writable()).collect()
+    }
+
+    pub fn data_segments(&self) -> Vec<&ElfSegment> {
+        self.segments.iter().filter(|s| s.loadable && s.is_writable()).collect()
     }
 
     pub fn loadable_segments(&self) -> Vec<&ElfSegment> {

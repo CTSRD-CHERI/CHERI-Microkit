@@ -53,6 +53,7 @@ impl Riscv64 {
     const PTE_TYPE_VALID: u64 = 1;
 
     const PTE_PPN0_SHIFT: u64 = 10;
+    const PTE_CHERI_BITS: u64 = 0x2 << 59;
 
     /// Due to RISC-V having various virtual memory setups, we have this generic function to
     /// figure out the page-table index given the total number of page table levels for the
@@ -74,7 +75,7 @@ impl Riscv64 {
     }
 
     pub fn pte_leaf(addr: u64) -> u64 {
-        Self::pte_ppn(addr) | Self::PTE_TYPE_BITS | Self::PTE_TYPE_VALID
+        Self::pte_ppn(addr) | Self::PTE_CHERI_BITS | Self::PTE_TYPE_BITS | Self::PTE_TYPE_VALID
     }
 }
 
@@ -116,6 +117,7 @@ struct LoaderHeader64 {
     ui_p_reg_end: u64,
     pv_offset: u64,
     v_entry: u64,
+    v_entry_size: u64,
     extra_device_addr_p: u64,
     extra_device_size: u64,
     num_regions: u64,
@@ -260,6 +262,10 @@ impl<'a> Loader<'a> {
         assert!(ui_p_reg_end > ui_p_reg_start);
 
         let v_entry = initial_task_elf.entry;
+        let v_entry_size = initial_task_elf.get_code_segement_size();
+        let elf_flags = initial_task_elf.flags;
+
+        println!("v_entry_size = {}", v_entry_size);
 
         let extra_device_addr_p = reserved_region.base;
         let extra_device_size = reserved_region.size();
@@ -275,9 +281,13 @@ impl<'a> Loader<'a> {
         all_regions_with_loader.push((image_vaddr, &image));
         check_non_overlapping(&all_regions_with_loader);
 
-        let flags = match config.hypervisor {
-            true => 1,
-            false => 0,
+        let mut flags = if config.hypervisor {1} else {0};
+        flags |= if config.cheri {1 << 1} else {0};
+        //flags |= if config.cheri_hybrid {1 << 2} else {0};
+
+        flags |= match config.arch {
+            Arch::Aarch64 => ((elf_flags & 0x00010000) >> 16) << 3,
+            Arch::Riscv64 => ((elf_flags & 0x00020000) >> 17) << 3,
         };
 
         let mut region_metadata = Vec::new();
@@ -306,6 +316,7 @@ impl<'a> Loader<'a> {
             ui_p_reg_end,
             pv_offset,
             v_entry,
+            v_entry_size,
             extra_device_addr_p,
             extra_device_size,
             num_regions: all_regions.len() as u64,

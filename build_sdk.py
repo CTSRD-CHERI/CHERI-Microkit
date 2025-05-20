@@ -15,6 +15,7 @@ than in make.
 from argparse import ArgumentParser
 from os import popen, system, environ
 from shutil import copy
+from shutil import move
 from pathlib import Path
 from dataclasses import dataclass
 from sys import executable
@@ -308,6 +309,68 @@ SUPPORTED_BOARDS = (
             "KernelRiscvExtF": True,
         },
     ),
+    BoardInfo(
+        name="hobgoblin_vcu118",
+        arch=KernelArch.RISCV64,
+        gcc_cpu=None,
+        loader_link_address=0x90000000,
+        kernel_options={
+            "KernelPlatform": "hobgoblin-vcu118",
+            "KernelIsMCS": True,
+            "QEMU_MEMORY": "2048",
+            "KernelRiscvExtD": True,
+            "KernelRiscvExtF": True,
+        },
+    ),
+    BoardInfo(
+        name="toooba_de10",
+        arch=KernelArch.RISCV64,
+        gcc_cpu=None,
+        loader_link_address=0xd0000000,
+        kernel_options={
+            "KernelPlatform": "toooba-de10",
+            "KernelIsMCS": True,
+            "KernelRiscvExtD": True,
+            "KernelRiscvExtF": True,
+        },
+    ),
+    BoardInfo(
+        name="toooba_besspin",
+        arch=KernelArch.RISCV64,
+        gcc_cpu=None,
+        loader_link_address=0x90000000,
+        kernel_options={
+            "KernelPlatform": "toooba-besspin",
+            "KernelIsMCS": True,
+            "KernelRiscvExtD": True,
+            "KernelRiscvExtF": True,
+        },
+    ),
+#    BoardInfo(
+#        name="morello_qemu",
+#        arch=KernelArch.AARCH64,
+#        gcc_cpu="rainier",
+#        loader_link_address=0x70000000,
+#        kernel_options={
+#            "KernelPlatform": "morello-qemu",
+#            "KernelIsMCS": True,
+#            "KernelArmMorello": True,
+#            "KernelArmExportPCNTUser": True,
+#            "QEMU_MEMORY": "2048",
+#            "KernelArmHypervisorSupport": True,
+#            "KernelArmExportPCNTUser": True,
+#            "KernelArmExportPTMRUser": True,
+#            "KernelArmVtimerUpdateVOffset": False,
+#        },
+#    ),
+)
+
+SUPPORTED_CHERI_BOARDS = (
+   "qemu_virt_riscv64",
+   "hobgoblin_vcu118",
+   "toooba_de10",
+   "toooba_besspin",
+   "ariane"
 )
 
 SUPPORTED_CONFIGS = (
@@ -333,6 +396,15 @@ SUPPORTED_CONFIGS = (
             "KernelDebugBuild": False,
             "KernelVerificationBuild": False,
             "KernelBenchmarks": "track_utilisation"
+        },
+    ),
+    ConfigInfo(
+        name="cheri",
+        debug=True,
+        kernel_options={
+            "KernelRiscvExtY": True,
+            "KernelDebugBuild": True,
+            "KernelVerificationBuild": False,
         },
     ),
 )
@@ -538,6 +610,9 @@ def build_elf_component(
     if board.gcc_cpu is not None:
         defines_str += f" GCC_CPU={board.gcc_cpu}"
 
+    if config.name == "cheri":
+        defines_str += f" CHERI=1"
+
     r = system(
         f"{defines_str} make -C {component_name}"
     )
@@ -585,13 +660,38 @@ def build_lib_component(
     if board.gcc_cpu is not None:
         defines_str += f" GCC_CPU={board.gcc_cpu}"
 
+    if config.name == "cheri":
+        r = system(
+            f"{defines_str} CHERI=1 make clean -C {component_name}"
+        )
+
+        r = system(
+            f"{defines_str} CHERI=1 make -C {component_name}"
+        )
+        if r != 0:
+            raise Exception(
+                f"Error building: {component_name}_purecap for board: {board.name} config: {config.name}"
+            )
+        lib_dir = root_dir / "board" / board.name / config.name / "lib"
+        lib = build_dir / f"{component_name}_purecap.a"
+        dest = lib_dir / f"{component_name}_purecap.a"
+        dest.unlink(missing_ok=True)
+        move(lib, dest)
+        # Make output read-only
+        dest.chmod(0o744)
+
     r = system(
-        f"{defines_str} make -C {component_name}"
+        f"{defines_str} CHERI=1 make clean -C {component_name}"
+    )
+
+    r = system(
+        f"{defines_str} CHERI=0 make -C {component_name}"
     )
     if r != 0:
         raise Exception(
             f"Error building: {component_name} for board: {board.name} config: {config.name}"
         )
+
     lib = build_dir / f"{component_name}.a"
     lib_dir = root_dir / "board" / board.name / config.name / "lib"
     dest = lib_dir / f"{component_name}.a"
@@ -724,9 +824,13 @@ def main() -> None:
     build_dir = Path("build")
     for board in selected_boards:
         for config in selected_configs:
+            if config.name == "cheri" and board.name not in SUPPORTED_CHERI_BOARDS:
+                continue
+
             if not args.skip_sel4:
                 sel4_gen_config = build_sel4(sel4_dir, root_dir, build_dir, board, config, args.llvm)
-            loader_printing = 1 if config.name == "debug" else 0
+
+            loader_printing = 1 if config.name == "debug" or config.name == "cheri" else 0
             loader_defines = [
                 ("LINK_ADDRESS", hex(board.loader_link_address)),
                 ("PRINTING", loader_printing)
@@ -740,6 +844,8 @@ def main() -> None:
                     arm_pa_size_bits = 40
                 elif sel4_gen_config["ARM_PA_SIZE_BITS_44"]:
                     arm_pa_size_bits = 44
+                elif sel4_gen_config["ARM_PA_SIZE_BITS_48"]:
+                    arm_pa_size_bits = 47
                 else:
                     raise Exception("Unexpected ARM physical address bits defines")
                 loader_defines.append(("PHYSICAL_ADDRESS_BITS", arm_pa_size_bits))

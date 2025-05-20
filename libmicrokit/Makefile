@@ -15,6 +15,10 @@ ifeq ($(strip $(TARGET_TRIPLE)),)
 $(error TARGET_TRIPLE must be specified)
 endif
 
+ifndef CHERI
+CHERI = 0
+endif
+
 ifeq ($(strip $(LLVM)),True)
   CC := clang -target $(TARGET_TRIPLE)
   CPP := clang-cpp -target $(TARGET_TRIPLE)
@@ -31,16 +35,37 @@ else
   CFLAGS_TOOLCHAIN := -Wno-maybe-uninitialized
 endif
 
+ifeq ($(CHERI),1)
+ifeq ($(ARCH),aarch64)
+	CFLAGS_ARCH :=  -mcpu=$(GCC_CPU) -march=morello -mabi=aapcs
+	ASM_CPP_FLAGS := -x assembler-with-cpp -c -g -mcpu=$(GCC_CPU) -march=morello -mabi=aapcs
+	ASM_FLAGS := -c -mcpu=$(GCC_CPU) -march=morello -mabi=aapcs
+	CFLAGS_ARCH := $(CFLAGS_AARCH64)
+
+	ARCH_DIR := aarch64
+else ifeq ($(ARCH),riscv64)
+	ASM_FLAGS := -march=rv64imafdc_zicsr_zcherihybrid -mabi=l64pc128d
+	CFLAGS_RISCV64 := -mcmodel=medany -march=rv64imafdc_zicsr_zcherihybrid -mabi=l64pc128d
+	CFLAGS_ARCH := $(CFLAGS_RISCV64)
+	ARCH_DIR := riscv
+endif
+LIBS := libmicrokit_purecap.a
+OBJS := main.o crt0.o dbg.o cheri.o
+else
 ifeq ($(ARCH),aarch64)
 	ASM_FLAGS := -mcpu=$(GCC_CPU)
 	CFLAGS_AARCH64 := -mcpu=$(GCC_CPU)
 	CFLAGS_ARCH := $(CFLAGS_AARCH64)
+
 	ARCH_DIR := aarch64
 else ifeq ($(ARCH),riscv64)
 	ASM_FLAGS := -march=rv64imafdc_zicsr_zifencei -mabi=lp64d
 	CFLAGS_RISCV64 := -mcmodel=medany -march=rv64imafdc_zicsr_zifencei -mabi=lp64d
 	CFLAGS_ARCH := $(CFLAGS_RISCV64)
 	ARCH_DIR := riscv
+endif
+LIBS := libmicrokit.a
+OBJS := main.o crt0.o dbg.o
 endif
 
 CFLAGS := -std=gnu11 \
@@ -50,9 +75,6 @@ CFLAGS := -std=gnu11 \
 		  -Wno-unused-function -Werror \
 		  -Iinclude -I$(SEL4_SDK)/include \
 		  $(CFLAGS_ARCH)
-
-LIBS := libmicrokit.a
-OBJS := main.o crt0.o dbg.o
 
 $(BUILD_DIR)/%.o : src/$(ARCH_DIR)/%.S
 	$(CC) -x assembler-with-cpp -c $(CFLAGS) $< -o $@
@@ -65,7 +87,8 @@ $(BUILD_DIR)/%.o : src/%.c
 
 LIB = $(addprefix $(BUILD_DIR)/, $(LIBS))
 
-all: $(LIB)
-
 $(LIB): $(addprefix $(BUILD_DIR)/, $(OBJS))
 	$(AR) -rv $@ $^
+
+clean:
+	rm  $(addprefix $(BUILD_DIR)/, $(OBJS))

@@ -36,7 +36,11 @@ void dump_bootinfo(seL4_BootInfo *bi)
     puts("\n");
 
     puts("ipcBuffer*              = ");
-    puthex64((uintptr_t)bi->ipcBuffer);
+#if __has_feature(capabilities)
+    puthex64((uintptr_t)__builtin_cheri_address_get(bi->ipcBuffer));
+#else
+    puthex64((uintptr_t)(bi->ipcBuffer));
+#endif
     puts("\n");
 
     puts("initThreadCNodeSizeBits = ");

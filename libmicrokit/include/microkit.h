@@ -78,7 +78,11 @@ static inline void microkit_internal_crash(seL4_Error err)
      * `err` as the fault address. A bit of a cute hack. Not a good long term
      * solution but good for now.
      */
+#if defined(__CHERI_PURE_CAPABILITY__)
+    int *x = (int *)(__uintcap_t) err;
+#else
     int *x = (int *)(seL4_Word) err;
+#endif
     *x = 0;
 }
 
@@ -109,6 +113,27 @@ static inline void microkit_irq_ack(microkit_channel ch)
 static inline void microkit_pd_restart(microkit_child pd, seL4_Word entry_point)
 {
     seL4_Error err;
+#if defined(CONFIG_HAVE_CHERI)
+    seL4_TCB_CheriReadRegister_t unpacked_reg;
+    unpacked_reg = seL4_TCB_CheriReadRegister(
+              BASE_TCB_CAP + pd,
+              0
+          );
+
+    err = seL4_TCB_CheriWriteRegister(
+              BASE_TCB_CAP + pd,
+              0,
+              0,
+              unpacked_reg.cheri_base,
+              entry_point, /* writing 1 register */
+              unpacked_reg.cheri_size,
+              unpacked_reg.cheri_meta
+          );
+
+    if (err == seL4_NoError) {
+        err = seL4_TCB_Resume(BASE_TCB_CAP + pd);
+    }
+#else
     seL4_UserContext ctxt = {0};
     ctxt.pc = entry_point;
     err = seL4_TCB_WriteRegisters(
@@ -118,6 +143,7 @@ static inline void microkit_pd_restart(microkit_child pd, seL4_Word entry_point)
               1, /* writing 1 register */
               &ctxt
           );
+#endif
 
     if (err != seL4_NoError) {
         microkit_dbg_puts("microkit_pd_restart: error writing TCB registers\n");

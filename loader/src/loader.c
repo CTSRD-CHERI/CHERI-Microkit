@@ -8,6 +8,10 @@
 
 _Static_assert(sizeof(uintptr_t) == 8 || sizeof(uintptr_t) == 4, "Expect uintptr_t to be 32-bit or 64-bit");
 
+#ifndef __has_feature
+#define __has_feature(x) 0
+#endif
+
 #if UINTPTR_MAX == 0xffffffffUL
 #define WORD_SIZE 32
 #else
@@ -31,7 +35,7 @@ _Static_assert(sizeof(uintptr_t) == 8 || sizeof(uintptr_t) == 4, "Expect uintptr
 #if defined(BOARD_zcu102) || defined(BOARD_ultra96v2)
 #define GICD_BASE 0x00F9010000UL
 #define GICC_BASE 0x00F9020000UL
-#elif defined(BOARD_qemu_virt_aarch64)
+#elif defined(BOARD_qemu_virt_aarch64) || defined(BOARD_morello_qemu)
 #define GICD_BASE 0x8000000UL
 #define GICC_BASE 0x8010000UL
 #endif
@@ -40,6 +44,9 @@ _Static_assert(sizeof(uintptr_t) == 8 || sizeof(uintptr_t) == 4, "Expect uintptr
 #define REGION_TYPE_ZERO 2
 
 #define FLAG_SEL4_HYP (1UL << 0)
+#define FLAG_SEL4_CHERI (1UL << 1)
+#define FLAG_SEL4_CHERI_KERNEL_MODE (1UL << 2)
+#define FLAG_SEL4_CHERI_MONITOR_MODE (1UL << 3)
 
 enum el {
     EL0 = 0,
@@ -64,6 +71,7 @@ struct loader_data {
     uintptr_t ui_p_reg_end;
     uintptr_t pv_offset;
     uintptr_t v_entry;
+    uintptr_t v_entry_size;
     uintptr_t extra_device_addr_p;
     uintptr_t extra_device_size;
 
@@ -75,7 +83,11 @@ typedef void (*sel4_entry)(
     uintptr_t ui_p_reg_start,
     uintptr_t ui_p_reg_end,
     intptr_t pv_offset,
+#if __has_feature(capabilities)
+    void *__capability v_entry,
+#else
     uintptr_t v_entry,
+#endif
     uintptr_t dtb_addr_p,
     uintptr_t dtb_size,
     uintptr_t extra_device_addr_p,
@@ -257,7 +269,7 @@ static void putc(uint8_t ch)
 
     *((volatile uint32_t *)(UART_BASE + R_UART_TX_RX_FIFO)) = ch;
 }
-#elif defined(BOARD_qemu_virt_aarch64)
+#elif defined(BOARD_qemu_virt_aarch64) || defined(BOARD_morello_qemu)
 #define UART_BASE                 0x9000000
 #define PL011_TCR                 0x030
 #define PL011_UARTDR              0x000
@@ -537,6 +549,16 @@ static void print_flags(void)
     if (loader_data->flags & FLAG_SEL4_HYP) {
         puts("             seL4 configured as hypervisor\n");
     }
+
+    if (loader_data->flags & FLAG_SEL4_CHERI) {
+        puts("             seL4 configured with CHERI support\n");
+
+        if (loader_data->flags & FLAG_SEL4_CHERI_MONITOR_MODE) {
+            puts("             Monitor is a purecap CHERI ELF/task\n");
+        } else {
+            puts("             Monitor is a hybrid CHERI ELF/task\n");
+        }
+    }
 }
 
 static void print_loader_data(void)
@@ -642,13 +664,50 @@ static int ensure_correct_el(void)
 }
 #endif
 
+#if __has_feature(capabilities) && defined(ARCH_riscv64)
+static inline void *__capability CheriArch_get_pcc(void)
+{
+    void *__capability pcc;
+    /* cheriTODO: user a compiler builtin once supported */
+    asm volatile("modesw.cap       \n"
+                 ".option push     \n"
+                 ".option capmode  \n"
+                 "auipc %0, 0      \n"
+                 ".option pop      \n"
+                 "modesw.int       \n"
+                 :"=C"(pcc)::);
+    return pcc;
+}
+#endif
+
 static void start_kernel(void)
 {
+#if __has_feature(capabilities)
+    /* Set the capability address */
+    void *__capability v_entry =  __builtin_cheri_address_set(
+        (void *__capability) CheriArch_get_pcc(),
+        loader_data->v_entry);
+
+    /* Set the capability length if in purecap mode */
+    if (loader_data->flags & FLAG_SEL4_CHERI_MONITOR_MODE) {
+        v_entry = __builtin_cheri_bounds_set(v_entry, (size_t) loader_data->v_entry_size);
+        v_entry = __builtin_cheri_flags_set(v_entry, 0);
+    } else {
+        v_entry = __builtin_cheri_flags_set(v_entry, 1);
+    }
+
+    v_entry = __builtin_cheri_perms_and(v_entry,
+        ~__CHERI_CAP_PERMISSION_ACCESS_SYSTEM_REGISTERS__);
+    v_entry = __builtin_cheri_seal_entry(v_entry);
+#else
+    uintptr_t v_entry = loader_data->v_entry;
+#endif
+
     ((sel4_entry)(loader_data->kernel_entry))(
         loader_data->ui_p_reg_start,
         loader_data->ui_p_reg_end,
         loader_data->pv_offset,
-        loader_data->v_entry,
+        v_entry,
         0,
         0,
         loader_data->extra_device_addr_p,
@@ -656,7 +715,7 @@ static void start_kernel(void)
     );
 }
 
-#if defined(BOARD_zcu102) || defined(BOARD_ultra96v2) || defined(BOARD_qemu_virt_aarch64)
+#if defined(BOARD_zcu102) || defined(BOARD_ultra96v2) || defined(BOARD_qemu_virt_aarch64) || defined(BOARD_morello_qemu)
 static void configure_gicv2(void)
 {
     /* The ZCU102 start in EL3, and then we drop to EL1(NS).
@@ -763,7 +822,7 @@ int main(void)
      */
     copy_data();
 
-#if defined(BOARD_zcu102) || defined(BOARD_ultra96v2) || defined(BOARD_qemu_virt_aarch64)
+#if defined(BOARD_zcu102) || defined(BOARD_ultra96v2) || defined(BOARD_qemu_virt_aarch64) || defined(BOARD_morello_qemu)
     configure_gicv2();
 #endif
 

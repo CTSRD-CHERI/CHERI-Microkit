@@ -39,6 +39,18 @@ ifeq ($(strip $(PRINTING)),)
 $(error PRINTING must be specified)
 endif
 
+ifndef CHERI
+CHERI := 0
+endif
+
+ifeq ($(CHERI),1)
+ifeq ($(ARCH),riscv64)
+	CFLAGS_RISCV64 := -mcmodel=medany -march=rv64imac_zicsr_zifencei_zcherihybrid -mabi=lp64 -mno-relax
+	CFLAGS_ARCH := $(CFLAGS_RISCV64) -DARCH_riscv64
+	ASM_FLAGS_ARCH := -march=rv64imac_zicsr_zifencei_zcherihybrid -mabi=lp64 -DFIRST_HART_ID=$(FIRST_HART_ID)
+	ARCH_DIR := riscv
+endif
+else
 ifeq ($(ARCH),aarch64)
 	CFLAGS_AARCH64 := -DPHYSICAL_ADDRESS_BITS=$(PHYSICAL_ADDRESS_BITS) -mcpu=$(GCC_CPU) -mgeneral-regs-only
 	CFLAGS_ARCH := $(CFLAGS_AARCH64) -DARCH_aarch64
@@ -49,6 +61,7 @@ else ifeq ($(ARCH),riscv64)
 	CFLAGS_ARCH := $(CFLAGS_RISCV64) -DARCH_riscv64
 	ASM_FLAGS_ARCH := -march=rv64imac_zicsr_zifencei -mabi=lp64 -DFIRST_HART_ID=$(FIRST_HART_ID)
 	ARCH_DIR := riscv
+endif
 endif
 
 CFLAGS := -std=gnu11 -g -O3 -nostdlib -ffreestanding $(CFLAGS_ARCH) -DBOARD_$(BOARD) -DPRINTING=$(PRINTING) -Wall -Werror -Wno-unused-function
