@@ -131,8 +131,22 @@ enum ElfSegmentAttributes {
     Read = 0x4,
 }
 
+// e_flags field definitions of ELFs for RISC-V
+// See: https://github.com/CTSRD-CHERI/cheri-elf-psabi/blob/master/riscv.md
+pub enum ElfFlagsRiscv {
+    EfRiscvCheriabi = 0x00010000,
+    EfRiscvCapMode = 0x00020000,
+}
+
+// e_flags field definitions of ELFs for AArch64
+// See: https://github.com/ARM-software/abi-aa/blob/main/aaelf64-morello/aaelf64-morello.rst
+pub enum ElfFlagsAArch64 {
+    EfAarch64CheriPurecap = 0x00010000,
+}
+
 pub struct ElfFile {
     pub word_size: usize,
+    pub flags: u64,
     pub entry: u64,
     pub segments: Vec<ElfSegment>,
     symbols: HashMap<String, (ElfSymbol64, bool)>,
@@ -188,6 +202,7 @@ impl ElfFile {
             ));
         }
 
+        let flags = hdr.flags.into();
         let entry = hdr.entry;
 
         // Read all the segments
@@ -296,6 +311,7 @@ impl ElfFile {
 
         Ok(ElfFile {
             word_size,
+            flags,
             entry,
             segments,
             symbols,
@@ -358,6 +374,14 @@ impl ElfFile {
                 idx
             )),
         }
+    }
+
+    pub fn code_segments(&self) -> Vec<&ElfSegment> {
+        self.segments.iter().filter(|s| s.loadable && s.is_executable() && !s.is_writable()).collect()
+    }
+
+    pub fn data_segments(&self) -> Vec<&ElfSegment> {
+        self.segments.iter().filter(|s| s.loadable && s.is_writable()).collect()
     }
 
     pub fn loadable_segments(&self) -> Vec<&ElfSegment> {

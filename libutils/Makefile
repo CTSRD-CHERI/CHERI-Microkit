@@ -39,9 +39,8 @@ endif
 ifeq ($(CHERI),True)
 ifeq ($(ARCH),riscv64)
   # Build in purecap CHERI ABI
-  ARCH_FLAGS := -march=rv64imafdc_zicsr_zcherihybrid -mabi=l64pc128d
+  ARCH_FLAGS := -march=rv64imafdc_zicsr_zcherihybrid -mabi=l64pc128d -DCONFIG_HAVE_CHERI
 endif
-OBJS := cheri.o
 else
 ifeq ($(ARCH),riscv64)
   ARCH_FLAGS := -march=rv64imafdc_zicsr_zifencei -mabi=lp64d
@@ -68,8 +67,8 @@ CFLAGS := -std=gnu11 \
 		  -Iinclude -I$(SEL4_SDK)/include \
 		  $(CFLAGS_ARCH)
 
-LIBS := libmicrokit.a
-OBJS := main.o crt0.o dbg.o $(OBJS)
+LIBS := libutils.a
+OBJS := util.o printf.o
 
 $(BUILD_DIR)/%.o : src/$(ARCH_DIR)/%.S
 	$(CC) -x assembler-with-cpp -c $(CFLAGS) $< -o $@
